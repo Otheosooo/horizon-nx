@@ -51,7 +51,7 @@ pub(super) fn to_key_event(change: KeyChange) -> Option<KeyEvent> {
             None
         };
         let all_mods_text = if ctrl && !alt && !gui {
-            ctrl_char.map(char_smol).or_else(|| normal_text.clone())
+            ctrl_char.and_then(char_smol).or_else(|| normal_text.clone())
         } else {
             normal_text.clone()
         };
