@@ -2,11 +2,12 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use horizon_switch::{Libnx, Pointer, TouchScreen};
+use horizon_switch::{Keyboard, Libnx, Mouse, MouseButtonId, MouseEvent, Pointer, TouchScreen};
 
+use super::keyboard;
 use super::{DeviceId, MonitorHandle, PlatformSpecificEventLoopAttributes, WindowId};
 use crate::dpi::{PhysicalPosition, PhysicalSize};
 use crate::error::EventLoopError;
@@ -17,6 +18,12 @@ use crate::event_loop::{self, ControlFlow, DeviceEvents};
 use crate::window::{
     CustomCursor as RootCustomCursor, CustomCursorSource, Theme, WindowId as RootWindowId,
 };
+
+#[cfg(target_os = "horizon")]
+unsafe extern "C" {
+    fn horizon_nx_menu_input();
+    fn horizon_nx_set_mouse_cursor_active(active: bool);
+}
 
 /// The longest the loop sleeps between looks at HID, the applet and the proxy: the Switch has no
 /// event to wait on, and a thread must never spin (a busy one starves lower-priority threads).
@@ -38,6 +45,8 @@ impl<T: 'static> EventLoop<T> {
                     exit: Cell::new(false),
                     redraw: Arc::new(AtomicBool::new(false)),
                     window_created: Cell::new(false),
+                    cursor_grabbed: Arc::new(AtomicBool::new(false)),
+                    cursor_override: Arc::new(Mutex::new(None)),
                 },
                 _marker: PhantomData,
             },
@@ -53,10 +62,14 @@ impl<T: 'static> EventLoop<T> {
         let target = &self.window_target;
         let id = RootWindowId(WindowId);
         let mut touch = TouchScreen::new();
+        let mut mouse = Mouse::new();
+        let mut keyboard = Keyboard::new();
         let mut cause = StartCause::Init;
         let mut size = super::screen_size();
         let mut focused = false;
         let mut cursor: Option<PhysicalPosition<f64>> = None;
+        let mut mouse_cursor =
+            PhysicalPosition::new(size.width as f64 / 2.0, size.height as f64 / 2.0);
         let mut button_down = false;
         let mut closing = false;
 
@@ -69,6 +82,7 @@ impl<T: 'static> EventLoop<T> {
             // The window was created in a callback: tell the app its size, as other backends do.
             if target.p.window_created.replace(false) {
                 size = super::screen_size();
+                mouse_cursor = clamp_pos(mouse_cursor, size);
                 handler(
                     event::Event::WindowEvent { window_id: id, event: WindowEvent::Resized(size) },
                     target,
@@ -79,10 +93,17 @@ impl<T: 'static> EventLoop<T> {
             let now_size = super::screen_size();
             if now_size != size {
                 size = now_size;
+                mouse_cursor = clamp_pos(mouse_cursor, size);
                 handler(
                     event::Event::WindowEvent { window_id: id, event: WindowEvent::Resized(size) },
                     target,
                 );
+            }
+
+            if let Some(pos) = target.p.cursor_override.lock().unwrap().take() {
+                let clamped = clamp_pos(pos, size);
+                mouse_cursor = clamped;
+                cursor = Some(clamped);
             }
 
             // The applet's messages are the game's to handle (`horizon_nx::process_applet_messages`
@@ -98,10 +119,145 @@ impl<T: 'static> EventLoop<T> {
                 );
             }
 
-            for pointer_event in
-                pointer_events(touch.poll(), size, &mut cursor, &mut button_down)
-            {
-                handler(event::Event::WindowEvent { window_id: id, event: pointer_event }, target);
+            let touch_events =
+                pointer_events(touch.poll(), size, &mut cursor, &mut button_down);
+            if !touch_events.is_empty() {
+                #[cfg(target_os = "horizon")]
+                // SAFETY: plain atomic store in horizon-nx.
+                unsafe {
+                    horizon_nx_set_mouse_cursor_active(false);
+                }
+                if let Some(at) = cursor {
+                    mouse_cursor = clamp_pos(at, size);
+                }
+                for pointer_event in touch_events {
+                    handler(
+                        event::Event::WindowEvent { window_id: id, event: pointer_event },
+                        target,
+                    );
+                }
+            }
+
+            let mouse_events = mouse.poll();
+            if !mouse_events.is_empty() {
+                #[cfg(target_os = "horizon")]
+                // SAFETY: plain functions in horizon-nx.
+                unsafe {
+                    horizon_nx_menu_input();
+                    horizon_nx_set_mouse_cursor_active(true);
+                }
+                let grabbed = target.p.cursor_grabbed.load(Ordering::Relaxed);
+                let device_id = event::DeviceId(DeviceId);
+                for mouse_event in mouse_events {
+                    match mouse_event {
+                        MouseEvent::Motion { dx, dy } => {
+                            if grabbed {
+                                handler(
+                                    event::Event::DeviceEvent {
+                                        device_id,
+                                        event: event::DeviceEvent::MouseMotion {
+                                            delta: (dx as f64, dy as f64),
+                                        },
+                                    },
+                                    target,
+                                );
+                            } else {
+                                mouse_cursor = clamp_pos(
+                                    PhysicalPosition::new(
+                                        mouse_cursor.x + dx as f64,
+                                        mouse_cursor.y + dy as f64,
+                                    ),
+                                    size,
+                                );
+                                cursor = Some(mouse_cursor);
+                                handler(
+                                    event::Event::WindowEvent {
+                                        window_id: id,
+                                        event: WindowEvent::CursorMoved {
+                                            device_id,
+                                            position: mouse_cursor,
+                                        },
+                                    },
+                                    target,
+                                );
+                            }
+                        },
+                        MouseEvent::Button { button, pressed } => {
+                            let button = match button {
+                                MouseButtonId::Left => MouseButton::Left,
+                                MouseButtonId::Right => MouseButton::Right,
+                                MouseButtonId::Middle => MouseButton::Middle,
+                                MouseButtonId::Forward => MouseButton::Forward,
+                                MouseButtonId::Back => MouseButton::Back,
+                            };
+                            handler(
+                                event::Event::WindowEvent {
+                                    window_id: id,
+                                    event: WindowEvent::MouseInput {
+                                        device_id,
+                                        state: if pressed {
+                                            ElementState::Pressed
+                                        } else {
+                                            ElementState::Released
+                                        },
+                                        button,
+                                    },
+                                },
+                                target,
+                            );
+                        },
+                        MouseEvent::Wheel { dx, dy } => {
+                            handler(
+                                event::Event::WindowEvent {
+                                    window_id: id,
+                                    event: WindowEvent::MouseWheel {
+                                        device_id,
+                                        delta: MouseScrollDelta::LineDelta(dx as f32, dy as f32),
+                                        phase: TouchPhase::Moved,
+                                    },
+                                },
+                                target,
+                            );
+                        },
+                    }
+                }
+            }
+
+            let kbd_frame = keyboard.poll();
+            if kbd_frame.modifiers_changed || !kbd_frame.events.is_empty() {
+                #[cfg(target_os = "horizon")]
+                // SAFETY: plain function in horizon-nx.
+                unsafe {
+                    horizon_nx_menu_input();
+                }
+                let device_id = event::DeviceId(DeviceId);
+                if kbd_frame.modifiers_changed {
+                    handler(
+                        event::Event::WindowEvent {
+                            window_id: id,
+                            event: WindowEvent::ModifiersChanged(keyboard::modifiers_from_frame(
+                                kbd_frame.modifiers,
+                                kbd_frame.pressed_modifier_keys,
+                            )),
+                        },
+                        target,
+                    );
+                }
+                for change in kbd_frame.events {
+                    if let Some(key_event) = keyboard::to_key_event(change) {
+                        handler(
+                            event::Event::WindowEvent {
+                                window_id: id,
+                                event: WindowEvent::KeyboardInput {
+                                    device_id,
+                                    event: key_event,
+                                    is_synthetic: false,
+                                },
+                            },
+                            target,
+                        );
+                    }
+                }
             }
 
             while let Ok(user) = self.user_events_receiver.try_recv() {
@@ -189,6 +345,13 @@ impl<T: 'static> EventLoop<T> {
     }
 }
 
+fn clamp_pos(pos: PhysicalPosition<f64>, size: PhysicalSize<u32>) -> PhysicalPosition<f64> {
+    PhysicalPosition::new(
+        pos.x.clamp(0.0, size.width.saturating_sub(1) as f64),
+        pos.y.clamp(0.0, size.height.saturating_sub(1) as f64),
+    )
+}
+
 /// The touch screen as a mouse: the finger moves the cursor and holds the left button down, a
 /// second finger scrolls, and tapping it is a right click.
 fn pointer_events(
@@ -254,6 +417,8 @@ pub struct ActiveEventLoop {
     exit: Cell<bool>,
     pub(super) redraw: Arc<AtomicBool>,
     pub(super) window_created: Cell<bool>,
+    pub(super) cursor_grabbed: Arc<AtomicBool>,
+    pub(super) cursor_override: Arc<Mutex<Option<PhysicalPosition<f64>>>>,
 }
 
 impl ActiveEventLoop {

@@ -67,6 +67,23 @@ pub use lifecycle::{
 pub use logging::nro_path;
 pub use logging::{flush_switch_logs, init_switch_logging, nro_dir};
 
+#[cfg(target_os = "horizon")]
+static MOUSE_CURSOR_ACTIVE: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+#[cfg(target_os = "horizon")]
+#[unsafe(no_mangle)]
+pub extern "C" fn horizon_nx_set_mouse_cursor_active(active: bool) {
+    MOUSE_CURSOR_ACTIVE.store(active, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a USB mouse moved or clicked more recently than the touch screen (used to draw a
+/// software menu pointer on Switch, which has no hardware OS cursor).
+#[cfg(target_os = "horizon")]
+pub fn mouse_cursor_active() -> bool {
+    MOUSE_CURSOR_ACTIVE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// With `on`, runs the calling thread just ahead of the game's own threads (which start at
 /// priority 0x3b), else back among them: for the time a thread only waits on the network (a
 /// download), so it isn't left waiting for a core while world generation and meshing keep every

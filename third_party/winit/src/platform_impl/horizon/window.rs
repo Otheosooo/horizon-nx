@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::cursor::Cursor;
 use crate::dpi::{PhysicalPosition, PhysicalSize, Position, Size};
@@ -20,6 +20,8 @@ unsafe extern "C" {
 /// The Switch's one window: libnx's default `NWindow`, always the whole screen.
 pub struct Window {
     redraw: Arc<AtomicBool>,
+    cursor_grabbed: Arc<AtomicBool>,
+    cursor_override: Arc<Mutex<Option<PhysicalPosition<f64>>>>,
 }
 
 impl Window {
@@ -28,7 +30,11 @@ impl Window {
         _attrs: window::WindowAttributes,
     ) -> Result<Self, error::OsError> {
         el.window_created.set(true);
-        Ok(Self { redraw: el.redraw.clone() })
+        Ok(Self {
+            redraw: el.redraw.clone(),
+            cursor_grabbed: el.cursor_grabbed.clone(),
+            cursor_override: el.cursor_override.clone(),
+        })
     }
 
     pub(crate) fn maybe_queue_on_main(&self, f: impl FnOnce(&Self) + Send + 'static) {
@@ -204,16 +210,19 @@ impl Window {
     pub fn set_cursor(&self, _: Cursor) {}
 
     #[inline]
-    pub fn set_cursor_position(&self, _: Position) -> Result<(), error::ExternalError> {
-        Err(error::ExternalError::NotSupported(error::NotSupportedError::new()))
+    pub fn set_cursor_position(&self, position: Position) -> Result<(), error::ExternalError> {
+        let pos = position.to_physical::<f64>(1.0);
+        *self.cursor_override.lock().unwrap() = Some(pos);
+        Ok(())
     }
 
-    /// There is no OS cursor to grab: the game's own pointer logic works on the touch events.
+    /// Sets cursor grab state for USB mice (touch events remain unaffected).
     #[inline]
     pub fn set_cursor_grab(
         &self,
         mode: window::CursorGrabMode,
     ) -> Result<(), error::ExternalError> {
+        self.cursor_grabbed.store(mode != window::CursorGrabMode::None, Ordering::Relaxed);
         // The game grabs the cursor when the player is in a world: horizon-nx ends its loading
         // CPU boost there (boost.rs; every later call returns at once).
         #[cfg(target_os = "horizon")]
@@ -224,7 +233,6 @@ impl Window {
             // SAFETY: a plain function of horizon-nx, which every Horizon program links.
             unsafe { horizon_nx_entered_world() };
         }
-        let _ = mode;
         Ok(())
     }
 

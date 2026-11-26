@@ -7,10 +7,16 @@
 //! tested on any host; only `hid` talks to libnx and exists on `target_os = "horizon"`.
 #[cfg(any(target_os = "horizon", feature = "ffi"))]
 mod hid;
+mod keyboard;
+mod mouse;
 mod npad;
 mod touch;
 
 #[cfg(any(target_os = "horizon", feature = "ffi"))]
-pub use hid::{Hid, Libnx, TouchScreen};
+pub use hid::{Hid, Keyboard, Libnx, Mouse, TouchScreen};
+pub use keyboard::{KeyChange, KeyboardFrame, KeyboardTracker, RawKeyboardSample, kbd_modifiers};
+pub use mouse::{
+    MouseButtonId, MouseEvent, MouseTracker, RawMouseSample, mouse_attrs, mouse_buttons,
+};
 pub use npad::{Frame, Key, Raw, Tracker, bits, style};
 pub use touch::{Pointer, Touch, Tracker as TouchTracker};

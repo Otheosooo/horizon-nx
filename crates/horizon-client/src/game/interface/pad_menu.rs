@@ -2320,6 +2320,20 @@ impl Game<'_> {
             return;
         }
         if !self.pad.in_use && !self.pad.menu.keyboard {
+            #[cfg(target_os = "horizon")]
+            if !self.captured && horizon_nx::mouse_cursor_active() {
+                use horizon_client::pad_cursor;
+                let (left, top) = pad_cursor::origin(self.cursor);
+                batch.sprite_scaled(
+                    &self.gui.atlas,
+                    pad_cursor::SPRITE,
+                    left,
+                    top,
+                    pad_cursor::DRAWN,
+                    pad_cursor::DRAWN,
+                    u32::MAX,
+                );
+            }
             return;
         }
         let Some((x, y)) = self.pad.menu.pos else {

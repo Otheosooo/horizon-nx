@@ -12,6 +12,7 @@ use crate::keyboard::Key;
 
 pub(crate) use self::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy, OwnedDisplayHandle};
 mod event_loop;
+mod keyboard;
 
 pub use self::window::Window;
 mod window;

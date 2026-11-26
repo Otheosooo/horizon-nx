@@ -239,6 +239,15 @@ pub extern "C" fn horizon_nx_entered_world() {
     end("the player is in a world");
 }
 
+/// The winit backend calls this on USB keyboard or mouse input so launch CPU boost drops
+/// immediately in menus without waiting for a Joy-Con or touchscreen tap.
+#[unsafe(no_mangle)]
+pub extern "C" fn horizon_nx_menu_input() {
+    if BOOSTED.load(Ordering::Relaxed) && REASON.load(Ordering::Relaxed) == FOR_LAUNCH {
+        end("input in the menus");
+    }
+}
+
 /// Ends the boost (once) and says why.
 fn end(why: &str) {
     if !BOOSTED.swap(false, Ordering::SeqCst) {

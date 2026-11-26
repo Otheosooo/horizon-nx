@@ -1,7 +1,10 @@
 //! libnx's HID: player 1 plus the handheld controls (libnx merges them), and the touch screen.
 //! The `PadState` layout and the pad calls are the ones bevy-horizon's `input.rs` runs on hardware;
 //! the touch layout follows switch/services/hid.h (checked by the size assertions below).
-use crate::{Frame, Pointer, Raw, Touch, TouchTracker, Tracker, style};
+use crate::{
+    Frame, KeyboardFrame, KeyboardTracker, MouseEvent, MouseTracker, Pointer, Raw,
+    RawKeyboardSample, RawMouseSample, Touch, TouchTracker, Tracker, style,
+};
 
 #[repr(C)]
 #[derive(Default, Copy, Clone)]
@@ -41,7 +44,7 @@ struct TouchState {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Default, Copy, Clone)]
 struct TouchScreenState {
     sampling_number: u64,
     count: i32,
@@ -49,10 +52,34 @@ struct TouchScreenState {
     touches: [TouchState; 16],
 }
 
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+struct HidMouseState {
+    sampling_number: u64,
+    x: i32,
+    y: i32,
+    delta_x: i32,
+    delta_y: i32,
+    wheel_delta_x: i32,
+    wheel_delta_y: i32,
+    buttons: u32,
+    attributes: u32,
+}
+
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+struct HidKeyboardState {
+    sampling_number: u64,
+    modifiers: u64,
+    keys: [u64; 4],
+}
+
 const _: () = {
     assert!(size_of::<PadState>() == 56);
     assert!(size_of::<TouchState>() == 40);
     assert!(size_of::<TouchScreenState>() == 656);
+    assert!(size_of::<HidMouseState>() == 40);
+    assert!(size_of::<HidKeyboardState>() == 48);
 };
 
 unsafe extern "C" {
@@ -61,6 +88,10 @@ unsafe extern "C" {
     fn padUpdate(state: *mut PadState);
     fn hidInitializeTouchScreen();
     fn hidGetTouchScreenStates(states: *mut TouchScreenState, count: usize) -> usize;
+    fn hidInitializeMouse();
+    fn hidGetMouseStates(states: *mut HidMouseState, count: usize) -> usize;
+    fn hidInitializeKeyboard();
+    fn hidGetKeyboardStates(states: *mut HidKeyboardState, count: usize) -> usize;
     fn appletMainLoop() -> bool;
     fn appletGetOperationMode() -> u32;
     fn appletGetFocusState() -> u32;
@@ -118,6 +149,87 @@ impl TouchScreen {
 }
 
 impl Default for TouchScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// USB HID mouse (OTG or dock), polled by the window system.
+pub struct Mouse {
+    tracker: MouseTracker,
+}
+
+impl Mouse {
+    pub fn new() -> Self {
+        // SAFETY: libnx call, safe to repeat.
+        unsafe { hidInitializeMouse() };
+        Self {
+            tracker: MouseTracker::default(),
+        }
+    }
+
+    pub fn is_connected(&self) -> bool {
+        self.tracker.is_connected()
+    }
+
+    pub fn poll(&mut self) -> Vec<MouseEvent> {
+        let mut states = [HidMouseState::default(); 16];
+        // SAFETY: libnx writes at most `states.len()` entries into `states`.
+        let n = unsafe { hidGetMouseStates(states.as_mut_ptr(), states.len()) }.min(states.len());
+        let mut raw = [RawMouseSample::default(); 16];
+        for (dst, src) in raw[..n].iter_mut().zip(&states[..n]) {
+            *dst = RawMouseSample {
+                sampling_number: src.sampling_number,
+                delta_x: src.delta_x,
+                delta_y: src.delta_y,
+                wheel_delta_x: src.wheel_delta_x,
+                wheel_delta_y: src.wheel_delta_y,
+                buttons: src.buttons,
+                attributes: src.attributes,
+            };
+        }
+        self.tracker.update(&raw[..n])
+    }
+}
+
+impl Default for Mouse {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// USB HID keyboard (OTG or dock), polled by the window system.
+pub struct Keyboard {
+    tracker: KeyboardTracker,
+}
+
+impl Keyboard {
+    pub fn new() -> Self {
+        // SAFETY: libnx call, safe to repeat.
+        unsafe { hidInitializeKeyboard() };
+        Self {
+            tracker: KeyboardTracker::default(),
+        }
+    }
+
+    pub fn poll(&mut self) -> KeyboardFrame {
+        let mut states = [HidKeyboardState::default(); 16];
+        // SAFETY: libnx writes at most `states.len()` entries into `states`.
+        let n =
+            unsafe { hidGetKeyboardStates(states.as_mut_ptr(), states.len()) }.min(states.len());
+        let mut raw = [RawKeyboardSample::default(); 16];
+        for (dst, src) in raw[..n].iter_mut().zip(&states[..n]) {
+            *dst = RawKeyboardSample {
+                sampling_number: src.sampling_number,
+                modifiers: src.modifiers,
+                keys: src.keys,
+            };
+        }
+        self.tracker.update(&raw[..n])
+    }
+}
+
+impl Default for Keyboard {
     fn default() -> Self {
         Self::new()
     }
